@@ -17,11 +17,9 @@ FPS  = 30
 MAX_DURATION   = 30.0
 AUDIO_FADE_OUT = 2.5
 
-# Ruhigere Ken-Burns Defaults
-KB_ZOOM_MIN_FOTO  = 1.02
-KB_ZOOM_MAX_FOTO  = 1.10
-KB_ZOOM_MIN_TITEL = 1.12   # Titel startet reingezoomt, zoomt raus
-KB_ZOOM_MAX_TITEL = 1.00   # Ziel: volle Größe
+KB_ZOOM_DEFAULT   = 0.06   # 6 % Zoom-Betrag pro Clip
+KB_ZOOM_MIN_TITEL = 1.12
+KB_ZOOM_MAX_TITEL = 1.00
 
 
 # ── Easing ────────────────────────────────────────────────────────────────────
@@ -112,61 +110,49 @@ def cover_crop_array(img: Image.Image, tw: int, th: int) -> np.ndarray:
 def ken_burns_clip(
     image_source,
     duration: float,
-    zoom_start: float = KB_ZOOM_MIN_FOTO,
-    zoom_end:   float = KB_ZOOM_MAX_FOTO,
-    easing     = ease_in_out_cubic,
-    grade: str = "warm",
+    zoom_amount: float = KB_ZOOM_DEFAULT,   # z. B. 0.06 = 6 % Zoom
+    direction: str     = "in",              # "in" | "out"
+    easing             = ease_in_out_cubic,
+    grade: str         = "warm",
     vignette_strength: float = 0.55,
-    seed: int | None = None,
 ) -> VideoClip:
-    """Ken-Burns mit Ease-in/out, Color Grade und Vignette."""
-    if seed is not None:
-        random.seed(seed)
-
+    """
+    Ken-Burns nur mit Zoom (kein Pan), langsam und kontrolliert.
+    direction='in'  → von 1.0 auf 1+zoom_amount
+    direction='out' → von 1+zoom_amount auf 1.0
+    """
     if isinstance(image_source, str):
         img = Image.open(image_source).convert("RGB")
     else:
         img = image_source.convert("RGB")
 
-    # Zufällige Pan-Richtung
-    pan_xs, pan_ys = random.uniform(-0.7, 0.7), random.uniform(-0.7, 0.7)
-    pan_xe, pan_ye = random.uniform(-0.7, 0.7), random.uniform(-0.7, 0.7)
+    if direction == "in":
+        zoom_start, zoom_end = 1.0, 1.0 + zoom_amount
+    else:
+        zoom_start, zoom_end = 1.0 + zoom_amount, 1.0
 
-    max_zoom = max(zoom_start, zoom_end) * 1.05
-    canvas_w = int(W * max_zoom)
-    canvas_h = int(H * max_zoom)
+    canvas_w = int(W * (1.0 + zoom_amount) * 1.02)
+    canvas_h = int(H * (1.0 + zoom_amount) * 1.02)
     arr_big  = cover_crop_array(img, canvas_w, canvas_h)
-
-    vig = get_vignette(vignette_strength)
+    vig      = get_vignette(vignette_strength)
 
     def make_frame(t: float) -> np.ndarray:
         p    = easing(t / duration if duration > 0 else 0.0)
         zoom = zoom_start + (zoom_end - zoom_start) * p
-        px   = pan_xs + (pan_xe - pan_xs) * p
-        py   = pan_ys + (pan_ye - pan_ys) * p
 
         cw = int(W * zoom)
         ch = int(H * zoom)
-        ox = max(0, (canvas_w - cw) // 2)
-        oy = max(0, (canvas_h - ch) // 2)
-        cx = canvas_w // 2 + int(px * ox)
-        cy = canvas_h // 2 + int(py * oy)
-
-        x1 = max(0, cx - cw // 2)
-        y1 = max(0, cy - ch // 2)
-        x2 = min(canvas_w, x1 + cw)
-        y2 = min(canvas_h, y1 + ch)
+        # Immer exakt zentriert — kein Pan
+        x1 = (canvas_w - cw) // 2
+        y1 = (canvas_h - ch) // 2
+        x2 = x1 + cw
+        y2 = y1 + ch
 
         patch = arr_big[y1:y2, x1:x2]
         frame = np.array(Image.fromarray(patch).resize((W, H), Image.LANCZOS))
-
-        # Color Grade
         frame = apply_grade(frame, grade)
-
-        # Vignette
         if vignette_strength > 0:
             frame = np.clip(frame * vig, 0, 255).astype(np.uint8)
-
         return frame
 
     return VideoClip(make_frame, duration=duration).with_fps(FPS)
@@ -273,10 +259,12 @@ def render_reel(
     audio_path: str | None   = None,
     total_duration: float    = 30.0,
     titel_duration: float    = 4.5,
-    crossfade: float         = 0.5,
-    beats_per_cut: int       = 3,
+    crossfade: float         = 1.5,
+    beats_per_cut: int       = 16,
     grade: str               = "warm",
     vignette_strength: float = 0.55,
+    kb_zoom: int             = 6,        # Zoom-Betrag in Prozent
+    kb_direction: str        = "alternate",
     audio_start: float       = 0.0,
     audio_end: float         = 30.0,
     audio_fade_in: float     = 0.0,
@@ -311,20 +299,22 @@ def render_reel(
     )
 
     # Fotos
+    zoom_amount = kb_zoom / 100.0
+
     foto_clips = []
     for i, (src, dur) in enumerate(zip(foto_sources, foto_durs)):
         name = os.path.basename(src) if isinstance(src, str) else f"Foto {i+1}"
         progress(f"Rendere {name} …")
-        # Abwechselnd rein- und rauszoomen für mehr Abwechslung
-        if i % 2 == 0:
-            z_start, z_end = KB_ZOOM_MIN_FOTO, KB_ZOOM_MAX_FOTO
+        if kb_direction == "alternate":
+            direction = "in" if i % 2 == 0 else "out"
         else:
-            z_start, z_end = KB_ZOOM_MAX_FOTO, KB_ZOOM_MIN_FOTO
+            direction = kb_direction
         foto_clips.append(ken_burns_clip(
             src, dur,
-            zoom_start=z_start, zoom_end=z_end,
-            grade=grade, vignette_strength=vignette_strength,
-            seed=i,
+            zoom_amount=zoom_amount,
+            direction=direction,
+            grade=grade,
+            vignette_strength=vignette_strength,
         ))
 
     # Montage

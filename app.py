@@ -206,10 +206,26 @@ with st.sidebar:
     st.markdown("### ⚙️ Einstellungen")
     st.markdown("---")
 
-    titel_dur     = st.slider("Titelkarten-Dauer (s)",      2.0, 7.0, loaded_s.get("titel_dur",     4.5), 0.5)
-    total_dur     = st.slider("Gesamtlänge ohne Audio (s)", 15,  30,  loaded_s.get("total_dur",      30),  1)
-    crossfade     = st.slider("Crossfade-Dauer (s)",        0.1, 1.2, loaded_s.get("crossfade",      0.5), 0.05)
-    beats_per_cut = st.slider("Beats pro Schnitt",          1,   6,   loaded_s.get("beats_per_cut",  3),   1)
+    titel_dur = st.slider("Titelkarten-Dauer (s)",      2.0, 7.0, loaded_s.get("titel_dur",  4.5), 0.5)
+    total_dur = st.slider("Gesamtlänge ohne Audio (s)", 15,  30,  loaded_s.get("total_dur",  30),  1)
+    crossfade = st.slider("Crossfade-Dauer (s)",        0.5, 3.0, loaded_s.get("crossfade",  1.5), 0.25)
+
+    beat_options = {
+        4:  "4 Beats — 1 Takt  (~2 s @ 120 BPM)",
+        8:  "8 Beats — 2 Takte (~4 s @ 120 BPM)",
+        16: "16 Beats — 4 Takte (~8 s @ 120 BPM)",
+        32: "32 Beats — 8 Takte (~16 s @ 120 BPM)",
+    }
+    saved_bpc = loaded_s.get("beats_per_cut", 16)
+    if saved_bpc not in beat_options:
+        saved_bpc = 16
+    beats_per_cut = st.selectbox(
+        "Schnitt-Rhythmus",
+        options=list(beat_options.keys()),
+        format_func=lambda k: beat_options[k],
+        index=list(beat_options.keys()).index(saved_bpc),
+        help="Schnitte passieren auf Takt-Grenzen — fühlt sich musikalisch an",
+    )
 
     st.markdown("---")
     st.markdown("### 🎨 Cinematic Look")
@@ -237,8 +253,18 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🎞️ Ken-Burns")
-    kb_min = st.slider("Zoom Minimum", 1.00, 1.08, loaded_s.get("kb_min", 1.02), 0.01)
-    kb_max = st.slider("Zoom Maximum", 1.04, 1.20, loaded_s.get("kb_max", 1.10), 0.01)
+    kb_zoom = st.slider(
+        "Zoom-Betrag (%)", 1, 12, loaded_s.get("kb_zoom", 6), 1,
+        help="Wie weit wird pro Clip gezoomt — z. B. 6 = von 100% auf 106%"
+    )
+    kb_direction = st.selectbox(
+        "Zoom-Richtung",
+        options=["alternate", "in", "out"],
+        format_func=lambda v: {"alternate": "↕ Abwechselnd (rein/raus)",
+                               "in":        "↑ Immer rein",
+                               "out":       "↓ Immer raus"}[v],
+        index=["alternate", "in", "out"].index(loaded_s.get("kb_direction", "alternate")),
+    )
 
     st.markdown("---")
     if github_ok:
@@ -737,6 +763,7 @@ if render_clicked and ready:
                 total_duration=total_dur, titel_duration=titel_dur,
                 crossfade=crossfade, beats_per_cut=beats_per_cut,
                 grade=grade, vignette_strength=vignette_strength,
+                kb_zoom=kb_zoom, kb_direction=kb_direction,
                 audio_start=audio_start, audio_end=audio_end,
                 audio_fade_in=audio_fade_in, audio_fade_out=audio_fade_out,
                 progress_callback=on_progress,
@@ -767,6 +794,7 @@ if render_clicked and ready:
                         "crossfade": crossfade, "beats_per_cut": beats_per_cut,
                         "kb_min": kb_min, "kb_max": kb_max,
                         "grade": grade, "vignette_strength": vignette_strength,
+                        "kb_zoom": kb_zoom, "kb_direction": kb_direction,
                         "audio_start": audio_start,
                         "audio_fade_in": audio_fade_in, "audio_fade_out": audio_fade_out,
                     }
