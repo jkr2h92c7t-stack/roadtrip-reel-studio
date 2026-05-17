@@ -1,0 +1,13 @@
+[theme]
+base            = "dark"
+primaryColor    = "#ff6b35"
+backgroundColor = "#0d0d0d"
+secondaryBackgroundColor = "#1a1a1a"
+textColor       = "#f0f0f0"
+font            = "sans serif"
+
+[server]
+maxUploadSize   = 200   # MB — für hochauflösende Fotos
+
+[browser]
+gatherUsageStats = false
