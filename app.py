@@ -792,7 +792,6 @@ if render_clicked and ready:
                     settings = {
                         "titel_dur": titel_dur, "total_dur": total_dur,
                         "crossfade": crossfade, "beats_per_cut": beats_per_cut,
-                        "kb_min": kb_min, "kb_max": kb_max,
                         "grade": grade, "vignette_strength": vignette_strength,
                         "kb_zoom": kb_zoom, "kb_direction": kb_direction,
                         "audio_start": audio_start,
