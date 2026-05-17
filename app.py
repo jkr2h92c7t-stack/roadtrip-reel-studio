@@ -363,50 +363,99 @@ with col_audio:
         audio_name_to_use, audio_bytes_to_use = st.session_state.loaded_audio
         st.markdown(f'<span class="chip green">✓ {audio_name_to_use} (aus Projekt)</span>', unsafe_allow_html=True)
 
+    # Standardwerte (aus geladenem Projekt oder frisch)
+    audio_start    = loaded_s.get("audio_start",    0.0)
+    audio_end      = loaded_s.get("audio_end",      30.0)
+    audio_fade_in  = loaded_s.get("audio_fade_in",  0.0)
+    audio_fade_out = loaded_s.get("audio_fade_out",  2.0)
+
     if audio_bytes_to_use:
         cache_key = f"beats_{audio_name_to_use}_{len(audio_bytes_to_use)}"
         if getattr(st.session_state, "_audio_cache_key", None) != cache_key:
-            with st.spinner("Analysiere Beats …"):
+            with st.spinner("Analysiere Audio …"):
                 with tempfile.NamedTemporaryFile(suffix=os.path.splitext(audio_name_to_use)[1], delete=False) as tmp:
                     tmp.write(audio_bytes_to_use)
                     tmp_path = tmp.name
                 bpm, beat_times = analyse_beats(tmp_path)
-                st.session_state.bpm = bpm
-                st.session_state.beat_times = beat_times
+                # Gesamtlänge des Tracks ermitteln
+                import soundfile as sf
+                info = sf.info(tmp_path)
+                st.session_state.bpm          = bpm
+                st.session_state.beat_times   = beat_times
+                st.session_state.audio_total  = info.duration
                 st.session_state._audio_cache_key = cache_key
+                st.session_state._audio_tmp   = tmp_path
 
-        bpm = st.session_state.bpm
+        bpm        = st.session_state.bpm
         beat_times = st.session_state.beat_times
+        total_len  = st.session_state.audio_total
+        tmp_path   = st.session_state._audio_tmp
 
         st.markdown(
             f'<span class="chip orange">♩ {bpm:.0f} BPM</span>'
-            f'<span class="chip">{len(beat_times)} Beats</span>',
+            f'<span class="chip">{int(total_len // 60)}:{int(total_len % 60):02d} min</span>',
             unsafe_allow_html=True,
         )
 
-        # Beat-Plot
-        with tempfile.NamedTemporaryFile(suffix=os.path.splitext(audio_name_to_use)[1], delete=False) as tmp2:
-            tmp2.write(audio_bytes_to_use)
-            tmp2_path = tmp2.name
+        # ── Audiobereich-Auswahl ──────────────────────────────────────────
+        st.markdown("**Audiobereich (Start → Ende)**")
+        max_end = min(float(int(total_len)), 300.0)   # max 5 min anzeigen
+        saved_start = min(audio_start, max_end - 5.0)
+        saved_end   = min(audio_end,   max_end)
+        audio_start, audio_end = st.slider(
+            "Audiobereich",
+            min_value=0.0,
+            max_value=max_end,
+            value=(saved_start, saved_end),
+            step=0.5,
+            format="%.1f s",
+            label_visibility="collapsed",
+        )
+        sel_dur = audio_end - audio_start
+        st.caption(f"Ausgewählt: {audio_start:.1f} s – {audio_end:.1f} s  ({sel_dur:.1f} s)")
 
-        y, sr = librosa.load(tmp2_path, sr=None, mono=True, duration=30.0)
-        times = np.linspace(0, len(y)/sr, num=len(y))
+        # ── Fade-in / Fade-out ────────────────────────────────────────────
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            audio_fade_in  = st.slider("Fade-in (s)",  0.0, 4.0,
+                                       loaded_s.get("audio_fade_in", 0.0), 0.5)
+        with fc2:
+            audio_fade_out = st.slider("Fade-out (s)", 0.0, 4.0,
+                                       loaded_s.get("audio_fade_out", 2.0), 0.5)
+
+        # ── Beat-Plot mit Bereichsmarkierung ─────────────────────────────
+        y, sr = librosa.load(tmp_path, sr=None, mono=True,
+                             offset=audio_start, duration=min(sel_dur, 30.0))
+        times = np.linspace(audio_start, audio_start + len(y)/sr, num=len(y))
 
         fig = go.Figure()
-        step = max(1, len(y)//2000)
-        fig.add_trace(go.Scatter(x=times[::step], y=y[::step], mode="lines",
-            line=dict(color="#444", width=0.8), showlegend=False))
-        for bt in beat_times[beats_per_cut-1::beats_per_cut]:
-            fig.add_vline(x=bt, line_width=1.2, line_color="#ff6b35", opacity=0.7)
+        step = max(1, len(y) // 2000)
+        fig.add_trace(go.Scatter(
+            x=times[::step], y=y[::step], mode="lines",
+            line=dict(color="#444", width=0.8), showlegend=False,
+        ))
+        # Ausgewählter Bereich als grüne Füllung
+        fig.add_vrect(x0=audio_start, x1=audio_end,
+                      fillcolor="rgba(34,197,94,0.06)", line_width=0)
+        fig.add_vline(x=audio_start, line_width=1.5, line_color="#22c55e", line_dash="dot")
+        fig.add_vline(x=audio_end,   line_width=1.5, line_color="#22c55e", line_dash="dot")
+        # Schnittmarken (verschoben um audio_start)
+        for bt in beat_times[beats_per_cut - 1 :: beats_per_cut]:
+            abs_bt = bt + audio_start
+            if audio_start <= abs_bt <= audio_end:
+                fig.add_vline(x=abs_bt, line_width=1, line_color="#ff6b35", opacity=0.6)
         fig.update_layout(
             paper_bgcolor="#1a1a1a", plot_bgcolor="#1a1a1a",
-            margin=dict(l=8, r=8, t=8, b=30), height=160,
+            margin=dict(l=8, r=8, t=8, b=30), height=150,
             xaxis=dict(title="Zeit (s)", color="#666", gridcolor="#2a2a2a", tickfont=dict(size=10)),
             yaxis=dict(showticklabels=False, gridcolor="#2a2a2a"),
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-        st.caption("Orangene Linien = Schnittmarken")
+        st.caption("🟠 Schnittmarken · 🟢 Ausgewählter Bereich")
+
     else:
+        audio_start, audio_end = 0.0, 30.0
+        audio_fade_in, audio_fade_out = 0.0, 2.0
         st.markdown(
             '<div style="color:#555;padding:1rem 0;">Ohne Audio werden Fotos gleichmäßig verteilt.</div>',
             unsafe_allow_html=True,
@@ -469,6 +518,8 @@ if render_clicked and ready:
                 total_duration=total_dur, titel_duration=titel_dur,
                 crossfade=crossfade, beats_per_cut=beats_per_cut,
                 grade=grade, vignette_strength=vignette_strength,
+                audio_start=audio_start, audio_end=audio_end,
+                audio_fade_in=audio_fade_in, audio_fade_out=audio_fade_out,
                 progress_callback=on_progress,
             )
             with open(output_path, "rb") as vf:
@@ -497,6 +548,8 @@ if render_clicked and ready:
                         "crossfade": crossfade, "beats_per_cut": beats_per_cut,
                         "kb_min": kb_min, "kb_max": kb_max,
                         "grade": grade, "vignette_strength": vignette_strength,
+                        "audio_start": audio_start, "audio_end": audio_end,
+                        "audio_fade_in": audio_fade_in, "audio_fade_out": audio_fade_out,
                     }
                     pname = locals().get("project_name", "") or ""
                     save_project(

@@ -10,7 +10,7 @@ import librosa
 from PIL import Image, ImageEnhance
 from moviepy import AudioFileClip, VideoClip, concatenate_videoclips
 from moviepy.video.fx import FadeIn, FadeOut
-from moviepy.audio.fx import AudioFadeOut
+from moviepy.audio.fx import AudioFadeOut, AudioFadeIn
 
 W, H = 1080, 1920
 FPS  = 30
@@ -270,13 +270,17 @@ def render_reel(
     titel_source,
     foto_sources: list,
     output_path: str,
-    audio_path: str | None = None,
-    total_duration: float  = 30.0,
-    titel_duration: float  = 4.5,
-    crossfade: float       = 0.5,
-    beats_per_cut: int     = 3,
-    grade: str             = "warm",
+    audio_path: str | None   = None,
+    total_duration: float    = 30.0,
+    titel_duration: float    = 4.5,
+    crossfade: float         = 0.5,
+    beats_per_cut: int       = 3,
+    grade: str               = "warm",
     vignette_strength: float = 0.55,
+    audio_start: float       = 0.0,
+    audio_end: float         = 30.0,
+    audio_fade_in: float     = 0.0,
+    audio_fade_out: float    = 2.0,
     progress_callback=None,
 ):
     n_fotos = len(foto_sources)
@@ -329,10 +333,20 @@ def render_reel(
     if final.duration > MAX_DURATION:
         final = final.subclipped(0, MAX_DURATION)
 
-    # Audio
+    # Audio: Bereich ausschneiden + Fade-in/out
     if audio_path:
-        audio = AudioFileClip(audio_path).subclipped(0, final.duration)
-        audio = audio.with_effects([AudioFadeOut(AUDIO_FADE_OUT)])
+        clip_dur = final.duration
+        a_start  = audio_start
+        a_end    = min(audio_end, a_start + clip_dur)
+        audio    = AudioFileClip(audio_path).subclipped(a_start, a_end)
+        # Auf Video-Länge kürzen falls nötig
+        if audio.duration > clip_dur:
+            audio = audio.subclipped(0, clip_dur)
+        fx = []
+        if audio_fade_in  > 0: fx.append(AudioFadeIn(audio_fade_in))
+        if audio_fade_out > 0: fx.append(AudioFadeOut(audio_fade_out))
+        if fx:
+            audio = audio.with_effects(fx)
         final = final.with_audio(audio)
 
     # Export
