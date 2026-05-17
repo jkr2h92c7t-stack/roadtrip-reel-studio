@@ -1,0 +1,43 @@
+{
+  "name": "projekt",
+  "timestamp": "20260517_080324",
+  "foto_filenames": [
+    {
+      "original": "KI-Spyder - 7.jpeg",
+      "stored": "foto_01.jpg"
+    },
+    {
+      "original": "KI-Spyder - 6.jpeg",
+      "stored": "foto_02.jpg"
+    },
+    {
+      "original": "KI-Spyder - 5.jpeg",
+      "stored": "foto_03.jpg"
+    },
+    {
+      "original": "KI-Spyder - 4.jpeg",
+      "stored": "foto_04.jpg"
+    },
+    {
+      "original": "KI-Spyder - 3.jpeg",
+      "stored": "foto_05.jpg"
+    },
+    {
+      "original": "KI-Spyder - 2.jpeg",
+      "stored": "foto_06.jpg"
+    },
+    {
+      "original": "KI-Spyder - 1.jpeg",
+      "stored": "foto_07.jpg"
+    }
+  ],
+  "audio_name": "track.mp3",
+  "settings": {
+    "titel_dur": 3.5,
+    "total_dur": 20,
+    "crossfade": 0.35,
+    "beats_per_cut": 2,
+    "kb_min": 1.05,
+    "kb_max": 1.18
+  }
+}
