@@ -45,6 +45,33 @@ def _get_file(repo: str, token: str, path: str) -> dict | None:
         raise
 
 
+def _get_file_bytes(repo: str, token: str, path: str) -> bytes | None:
+    """
+    Lädt Dateiinhalt als Bytes — funktioniert auch für Dateien > 1 MB.
+    GitHub liefert bei großen Dateien content='' + download_url statt Base64.
+    """
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    try:
+        data = _api("GET", url, token)
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            return None
+        raise
+
+    content = data.get("content", "").replace("\n", "")
+    if content:
+        return base64.b64decode(content)
+
+    # Datei > 1 MB: direkt per download_url laden
+    download_url = data.get("download_url")
+    if download_url:
+        resp = requests.get(download_url, headers=_headers(token))
+        resp.raise_for_status()
+        return resp.content
+
+    return None
+
+
 def _put_file(repo: str, token: str, path: str, content_bytes: bytes, message: str, sha: str | None = None):
     """Erstellt oder aktualisiert eine Datei im Repo."""
     url  = f"https://api.github.com/repos/{repo}/contents/{path}"
@@ -183,29 +210,27 @@ def load_project(repo: str, token: str, project_path: str) -> dict:
         "audio_name": str | None,
     }
     """
-    # Metadaten
-    meta_file = _get_file(repo, token, f"{project_path}/project.json")
-    meta = json.loads(base64.b64decode(meta_file["content"]).decode())
+    # Metadaten (project.json ist immer klein — _get_file reicht)
+    meta_raw = _get_file_bytes(repo, token, f"{project_path}/project.json")
+    meta = json.loads(meta_raw.decode())
 
     # Titelkarte
-    titel_file = _get_file(repo, token, f"{project_path}/titel.jpg")
-    titel_bytes = base64.b64decode(titel_file["content"])
+    titel_bytes = _get_file_bytes(repo, token, f"{project_path}/titel.jpg")
 
     # Fotos (in gespeicherter Reihenfolge)
     foto_list = []
     for entry in meta.get("foto_filenames", []):
         stored = entry["stored"]
-        f = _get_file(repo, token, f"{project_path}/fotos/{stored}")
-        if f:
-            foto_list.append((entry["original"], base64.b64decode(f["content"])))
+        fbytes = _get_file_bytes(repo, token, f"{project_path}/fotos/{stored}")
+        if fbytes:
+            foto_list.append((entry["original"], fbytes))
 
-    # Audio
+    # Audio — explizit _get_file_bytes, da Audiodateien oft > 1 MB
     audio_bytes, audio_name = None, None
     if meta.get("audio_name"):
-        af = _get_file(repo, token, f"{project_path}/audio/{meta['audio_name']}")
-        if af:
-            audio_bytes = base64.b64decode(af["content"])
-            audio_name  = meta["audio_name"]
+        audio_bytes = _get_file_bytes(repo, token, f"{project_path}/audio/{meta['audio_name']}")
+        if audio_bytes:
+            audio_name = meta["audio_name"]
 
     return {
         "meta":        meta,
