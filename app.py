@@ -4,7 +4,9 @@ Hochladen → Sortieren → Reel generieren → Herunterladen
 Projekte werden in GitHub gespeichert (Ring-Buffer, max. 8 Entwürfe).
 """
 
+import base64
 import io
+import json
 import os
 import tempfile
 
@@ -12,6 +14,7 @@ import librosa
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 from streamlit_sortables import sort_items
 
@@ -363,10 +366,16 @@ with col_audio:
         audio_name_to_use, audio_bytes_to_use = st.session_state.loaded_audio
         st.markdown(f'<span class="chip green">✓ {audio_name_to_use} (aus Projekt)</span>', unsafe_allow_html=True)
 
-    # Standardwerte (aus geladenem Projekt oder frisch)
-    audio_start    = loaded_s.get("audio_start",   0.0)
-    audio_fade_in  = loaded_s.get("audio_fade_in", 0.0)
+    # Standardwerte
+    audio_fade_in  = loaded_s.get("audio_fade_in",  0.0)
     audio_fade_out = loaded_s.get("audio_fade_out", 2.0)
+
+    # audio_start aus Session State (wird von der Canvas-Komponente gesetzt)
+    if "audio_start" not in st.session_state:
+        st.session_state.audio_start = loaded_s.get("audio_start", 0.0)
+    if loaded_s.get("audio_start") is not None and not st.session_state.get("_proj_loaded"):
+        st.session_state.audio_start = loaded_s["audio_start"]
+        st.session_state._proj_loaded = True
 
     if audio_bytes_to_use:
         cache_key = f"beats_{audio_name_to_use}_{len(audio_bytes_to_use)}"
@@ -406,29 +415,253 @@ with col_audio:
             unsafe_allow_html=True,
         )
 
-        # ── Fenster-Breite = Gesamtlänge des Reels ───────────────────────
-        window = float(total_dur)   # Fensterbreite in Sekunden
-        max_start = max(0.0, round(total_len - window, 1))
+        window    = float(total_dur)
+        max_start = max(0.0, total_len - window)
 
-        saved_start = min(float(audio_start), max_start)
-        audio_start = st.slider(
-            "▶ Startposition im Track",
-            min_value=0.0,
-            max_value=max_start,
-            value=saved_start,
-            step=0.5,
-            format="%.1f s",
-        )
-        audio_end = audio_start + window
+        # Waveform auf 600 Punkte downsampled für JS
+        n_points  = 600
+        step_w    = max(1, len(y_full) // n_points)
+        wave_data = y_full[::step_w].tolist()
 
-        mins_s = int(audio_start // 60)
-        secs_s = audio_start % 60
-        mins_e = int(audio_end // 60)
-        secs_e = audio_end % 60
-        st.caption(
-            f"Fenster: {mins_s}:{secs_s:04.1f} → {mins_e}:{secs_e:04.1f}  "
-            f"({window:.0f} s)"
-        )
+        # Beat-Positionen als Zeitstempel
+        beat_list = beat_times[beats_per_cut - 1 :: beats_per_cut].tolist()
+
+        # Audio als base64 für Web Audio API
+        audio_b64 = base64.b64encode(audio_bytes_to_use).decode()
+        audio_ext = os.path.splitext(audio_name_to_use)[1].lstrip(".") or "mp3"
+        audio_mime = {"mp3": "audio/mpeg", "wav": "audio/wav",
+                      "ogg": "audio/ogg", "aac": "audio/aac",
+                      "m4a": "audio/mp4"}.get(audio_ext, "audio/mpeg")
+
+        cur_start = float(st.session_state.audio_start)
+        cur_start = max(0.0, min(cur_start, max_start))
+
+        component_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #1a1a1a; font-family: sans-serif; padding: 8px; }}
+  #waveCanvas {{ width: 100%; height: 110px; cursor: grab; display: block;
+                 border-radius: 6px; background: #111; }}
+  #waveCanvas.dragging {{ cursor: grabbing; }}
+  .info {{ color: #888; font-size: 11px; margin: 6px 0 4px; }}
+  .info span {{ color: #ff6b35; font-weight: 600; }}
+  .controls {{ display: flex; gap: 8px; margin-top: 6px; align-items: center; }}
+  button {{ background: #ff6b35; color: #fff; border: none; border-radius: 6px;
+            padding: 5px 14px; font-size: 12px; cursor: pointer; font-weight: 600; }}
+  button:hover {{ background: #e55a24; }}
+  button.stop {{ background: #333; }}
+  .fade-row {{ display: flex; gap: 12px; margin-top: 8px; }}
+  .fade-col {{ flex: 1; }}
+  .fade-col label {{ color: #888; font-size: 11px; display: block; margin-bottom: 3px; }}
+  .fade-col input[type=range] {{ width: 100%; accent-color: #ff6b35; }}
+  .fade-val {{ color: #ff6b35; font-size: 11px; }}
+</style>
+</head>
+<body>
+<canvas id="waveCanvas"></canvas>
+<div class="info">
+  Fenster: <span id="startLbl">0.0</span>s → <span id="endLbl">0.0</span>s
+  &nbsp;·&nbsp; Ziehen zum Verschieben
+</div>
+<div class="controls">
+  <button id="playBtn">▶ Vorschau</button>
+  <button id="stopBtn" class="stop">■ Stop</button>
+</div>
+
+<script>
+const WAVE      = {json.dumps(wave_data)};
+const BEATS     = {json.dumps(beat_list)};
+const TOTAL     = {total_len:.3f};
+const WINDOW    = {window:.3f};
+const MAX_START = {max_start:.3f};
+const AUDIO_B64 = "{audio_b64}";
+const AUDIO_MIME= "{audio_mime}";
+
+let startPos = {cur_start:.3f};
+let audioCtx = null, sourceNode = null, isPlaying = false;
+
+// ── Canvas Setup ──────────────────────────────────────────────────────────────
+const canvas = document.getElementById("waveCanvas");
+const ctx    = canvas.getContext("2d");
+
+function resize() {{
+  canvas.width  = canvas.offsetWidth  * window.devicePixelRatio;
+  canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  draw();
+}}
+
+function timeToX(t) {{
+  return (t / TOTAL) * canvas.offsetWidth;
+}}
+
+function draw() {{
+  const W = canvas.offsetWidth, H = canvas.offsetHeight;
+  ctx.clearRect(0, 0, W, H);
+
+  const endPos = startPos + WINDOW;
+  const wx0 = timeToX(startPos), wx1 = timeToX(endPos);
+
+  // Waveform
+  const n = WAVE.length;
+  const maxAmp = Math.max(...WAVE.map(Math.abs), 0.001);
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {{
+    const x = (i / n) * W;
+    const t = (i / n) * TOTAL;
+    const inWin = t >= startPos && t <= endPos;
+    const amp   = (WAVE[i] / maxAmp) * (H * 0.42);
+    if (i === 0) ctx.moveTo(x, H/2 - amp);
+    else ctx.lineTo(x, H/2 - amp);
+  }}
+  ctx.strokeStyle = "#2a2a2a";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Waveform im Fenster heller
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {{
+    const x = (i / n) * W;
+    const t = (i / n) * TOTAL;
+    if (t < startPos || t > endPos) continue;
+    const amp = (WAVE[i] / maxAmp) * (H * 0.42);
+    ctx.lineTo(x, H/2 - amp);
+  }}
+  ctx.strokeStyle = "#666";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Fenster-Hintergrund
+  ctx.fillStyle = "rgba(255,107,53,0.10)";
+  ctx.fillRect(wx0, 0, wx1 - wx0, H);
+
+  // Beats
+  BEATS.forEach(bt => {{
+    const x = timeToX(bt);
+    const inWin = bt >= startPos && bt <= endPos;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.strokeStyle = inWin ? "rgba(255,107,53,0.85)" : "rgba(80,80,80,0.4)";
+    ctx.lineWidth = inWin ? 1.2 : 0.7;
+    ctx.stroke();
+  }});
+
+  // Fenster-Rahmen
+  ctx.strokeStyle = "#ff6b35";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(wx0 + 1, 1, wx1 - wx0 - 2, H - 2);
+
+  // Labels
+  document.getElementById("startLbl").textContent = startPos.toFixed(1);
+  document.getElementById("endLbl").textContent   = (startPos + WINDOW).toFixed(1);
+}}
+
+// ── Drag ──────────────────────────────────────────────────────────────────────
+let dragStartX = null, dragStartPos = null;
+
+canvas.addEventListener("mousedown", e => {{
+  dragStartX   = e.offsetX;
+  dragStartPos = startPos;
+  canvas.classList.add("dragging");
+}});
+
+window.addEventListener("mousemove", e => {{
+  if (dragStartX === null) return;
+  const rect   = canvas.getBoundingClientRect();
+  const curX   = e.clientX - rect.left;
+  const deltaT = ((curX - dragStartX) / canvas.offsetWidth) * TOTAL;
+  startPos = Math.max(0, Math.min(MAX_START, dragStartPos + deltaT));
+  draw();
+}});
+
+window.addEventListener("mouseup", () => {{
+  if (dragStartX === null) return;
+  dragStartX = null;
+  canvas.classList.remove("dragging");
+  // Wert an Streamlit zurückgeben
+  window.parent.postMessage({{
+    type: "streamlit:setComponentValue",
+    value: startPos
+  }}, "*");
+}});
+
+// Touch support
+canvas.addEventListener("touchstart", e => {{
+  dragStartX   = e.touches[0].clientX - canvas.getBoundingClientRect().left;
+  dragStartPos = startPos;
+}}, {{passive: true}});
+
+canvas.addEventListener("touchmove", e => {{
+  if (dragStartX === null) return;
+  e.preventDefault();
+  const curX   = e.touches[0].clientX - canvas.getBoundingClientRect().left;
+  const deltaT = ((curX - dragStartX) / canvas.offsetWidth) * TOTAL;
+  startPos = Math.max(0, Math.min(MAX_START, dragStartPos + deltaT));
+  draw();
+}}, {{passive: false}});
+
+canvas.addEventListener("touchend", () => {{
+  dragStartX = null;
+  window.parent.postMessage({{
+    type: "streamlit:setComponentValue",
+    value: startPos
+  }}, "*");
+}});
+
+// ── Audio Playback ────────────────────────────────────────────────────────────
+function b64ToArrayBuffer(b64) {{
+  const bin = atob(b64);
+  const buf = new ArrayBuffer(bin.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
+  return buf;
+}}
+
+async function play() {{
+  if (isPlaying) stop();
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = await audioCtx.decodeAudioData(b64ToArrayBuffer(AUDIO_B64));
+  sourceNode = audioCtx.createBufferSource();
+  sourceNode.buffer = buf;
+  sourceNode.connect(audioCtx.destination);
+  sourceNode.start(0, startPos, WINDOW);
+  isPlaying = true;
+  sourceNode.onended = () => {{ isPlaying = false; }};
+}}
+
+function stop() {{
+  if (sourceNode) {{ try {{ sourceNode.stop(); }} catch(e) {{}} }}
+  if (audioCtx)  {{ audioCtx.close(); }}
+  isPlaying = false;
+}}
+
+document.getElementById("playBtn").addEventListener("click", play);
+document.getElementById("stopBtn").addEventListener("click", stop);
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.addEventListener("resize", resize);
+resize();
+</script>
+</body>
+</html>
+"""
+        result = components.html(component_html, height=220, scrolling=False)
+
+        # Rückgabewert der Komponente (Drag-Position) in Session State übernehmen
+        if result is not None:
+            try:
+                new_start = float(result)
+                if 0.0 <= new_start <= max_start:
+                    st.session_state.audio_start = new_start
+            except (TypeError, ValueError):
+                pass
+
+        audio_start = float(st.session_state.audio_start)
+        audio_end   = audio_start + window
 
         # ── Fade-in / Fade-out ────────────────────────────────────────────
         fc1, fc2 = st.columns(2)
@@ -439,61 +672,8 @@ with col_audio:
             audio_fade_out = st.slider("Fade-out (s)", 0.0, 4.0,
                                        loaded_s.get("audio_fade_out", 2.0), 0.5)
 
-        # ── Wellenform: gesamter Track + Fenster-Rechteck + Beats ────────
-        times_full = np.linspace(0, total_len, num=len(y_full))
-        step_w = max(1, len(y_full) // 3000)
-
-        fig = go.Figure()
-
-        # Wellenform außerhalb des Fensters (dunkel)
-        fig.add_trace(go.Scatter(
-            x=times_full[::step_w], y=y_full[::step_w],
-            mode="lines", line=dict(color="#333", width=0.7),
-            showlegend=False,
-        ))
-
-        # Wellenform innerhalb des Fensters (heller)
-        mask = (times_full >= audio_start) & (times_full <= audio_end)
-        if mask.any():
-            fig.add_trace(go.Scatter(
-                x=times_full[mask][::max(1, mask.sum() // 1500)],
-                y=y_full[mask][::max(1, mask.sum() // 1500)],
-                mode="lines", line=dict(color="#888", width=0.9),
-                showlegend=False,
-            ))
-
-        # Fenster-Rechteck
-        fig.add_vrect(
-            x0=audio_start, x1=audio_end,
-            fillcolor="rgba(255,107,53,0.08)",
-            line_color="#ff6b35", line_width=1.5,
-        )
-
-        # Beat-Marker im gesamten Track
-        for bt in beat_times[beats_per_cut - 1 :: beats_per_cut]:
-            inside = audio_start <= bt <= audio_end
-            fig.add_vline(
-                x=bt,
-                line_width=1.0,
-                line_color="#ff6b35" if inside else "#555",
-                opacity=0.8 if inside else 0.3,
-            )
-
-        fig.update_layout(
-            paper_bgcolor="#1a1a1a", plot_bgcolor="#1a1a1a",
-            margin=dict(l=8, r=8, t=8, b=30), height=160,
-            xaxis=dict(
-                title="Zeit (s)", color="#666",
-                gridcolor="#2a2a2a", tickfont=dict(size=10),
-                range=[0, total_len],
-            ),
-            yaxis=dict(showticklabels=False, gridcolor="#2a2a2a"),
-        )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-        st.caption("🟠 Beats im Fenster · — Beats außerhalb · □ Ausgewähltes Fenster")
-
     else:
-        audio_start, audio_end = 0.0, 30.0
+        audio_start, audio_end = 0.0, float(total_dur)
         audio_fade_in, audio_fade_out = 0.0, 2.0
         st.markdown(
             '<div style="color:#555;padding:1rem 0;">Ohne Audio werden Fotos gleichmäßig verteilt.</div>',
