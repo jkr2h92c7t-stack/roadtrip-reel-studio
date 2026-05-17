@@ -203,19 +203,43 @@ with st.sidebar:
     st.markdown("### ⚙️ Einstellungen")
     st.markdown("---")
 
-    titel_dur = st.slider("Titelkarten-Dauer (s)", 2.0, 6.0, loaded_s.get("titel_dur", 3.5), 0.5)
-    total_dur = st.slider("Gesamtlänge ohne Audio (s)", 10, 30, loaded_s.get("total_dur", 20), 1)
-    crossfade = st.slider("Crossfade-Dauer (s)", 0.1, 1.0, loaded_s.get("crossfade", 0.35), 0.05)
-    beats_per_cut = st.slider("Beats pro Schnitt", 1, 4, loaded_s.get("beats_per_cut", 2), 1)
+    titel_dur     = st.slider("Titelkarten-Dauer (s)",      2.0, 7.0, loaded_s.get("titel_dur",     4.5), 0.5)
+    total_dur     = st.slider("Gesamtlänge ohne Audio (s)", 15,  30,  loaded_s.get("total_dur",      30),  1)
+    crossfade     = st.slider("Crossfade-Dauer (s)",        0.1, 1.2, loaded_s.get("crossfade",      0.5), 0.05)
+    beats_per_cut = st.slider("Beats pro Schnitt",          1,   6,   loaded_s.get("beats_per_cut",  3),   1)
+
+    st.markdown("---")
+    st.markdown("### 🎨 Cinematic Look")
+
+    grade_options = {
+        "warm":        "🌅 Warm — goldene Stunde",
+        "teal_orange": "🎬 Teal & Orange — Kino-Klassiker",
+        "cool":        "🧊 Cool — klare Luft",
+        "muted":       "🎞️ Muted — verblasster Film",
+        "neutral":     "⬜ Neutral — kein Farbstich",
+    }
+    saved_grade = loaded_s.get("grade", "warm")
+    grade_idx   = list(grade_options.keys()).index(saved_grade) if saved_grade in grade_options else 0
+    grade = st.selectbox(
+        "Farbgebung",
+        options=list(grade_options.keys()),
+        format_func=lambda k: grade_options[k],
+        index=grade_idx,
+    )
+
+    vignette_strength = st.slider(
+        "Vignette", 0.0, 1.0, loaded_s.get("vignette_strength", 0.55), 0.05,
+        help="Dunkler Rand-Effekt — gibt Tiefe"
+    )
 
     st.markdown("---")
     st.markdown("### 🎞️ Ken-Burns")
-    kb_min = st.slider("Zoom Minimum", 1.00, 1.10, loaded_s.get("kb_min", 1.05), 0.01)
-    kb_max = st.slider("Zoom Maximum", 1.05, 1.30, loaded_s.get("kb_max", 1.18), 0.01)
+    kb_min = st.slider("Zoom Minimum", 1.00, 1.08, loaded_s.get("kb_min", 1.02), 0.01)
+    kb_max = st.slider("Zoom Maximum", 1.04, 1.20, loaded_s.get("kb_max", 1.10), 0.01)
 
     st.markdown("---")
     if github_ok:
-        project_name = st.text_input("📝 Projektname (für Speichern)", placeholder="z. B. Tag3_Cefalù")
+        project_name = st.text_input("📝 Projektname", placeholder="z. B. Tag3_Cefalù")
     st.markdown('<p style="color:#555;font-size:0.75rem;">1080×1920 · 30 fps · H.264 · max. 30 s</p>', unsafe_allow_html=True)
 
 
@@ -444,6 +468,7 @@ if render_clicked and ready:
                 output_path=output_path, audio_path=audio_path,
                 total_duration=total_dur, titel_duration=titel_dur,
                 crossfade=crossfade, beats_per_cut=beats_per_cut,
+                grade=grade, vignette_strength=vignette_strength,
                 progress_callback=on_progress,
             )
             with open(output_path, "rb") as vf:
@@ -471,6 +496,7 @@ if render_clicked and ready:
                         "titel_dur": titel_dur, "total_dur": total_dur,
                         "crossfade": crossfade, "beats_per_cut": beats_per_cut,
                         "kb_min": kb_min, "kb_max": kb_max,
+                        "grade": grade, "vignette_strength": vignette_strength,
                     }
                     pname = locals().get("project_name", "") or ""
                     save_project(
