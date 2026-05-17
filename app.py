@@ -364,32 +364,41 @@ with col_audio:
         st.markdown(f'<span class="chip green">✓ {audio_name_to_use} (aus Projekt)</span>', unsafe_allow_html=True)
 
     # Standardwerte (aus geladenem Projekt oder frisch)
-    audio_start    = loaded_s.get("audio_start",    0.0)
-    audio_end      = loaded_s.get("audio_end",      30.0)
-    audio_fade_in  = loaded_s.get("audio_fade_in",  0.0)
-    audio_fade_out = loaded_s.get("audio_fade_out",  2.0)
+    audio_start    = loaded_s.get("audio_start",   0.0)
+    audio_fade_in  = loaded_s.get("audio_fade_in", 0.0)
+    audio_fade_out = loaded_s.get("audio_fade_out", 2.0)
 
     if audio_bytes_to_use:
         cache_key = f"beats_{audio_name_to_use}_{len(audio_bytes_to_use)}"
         if getattr(st.session_state, "_audio_cache_key", None) != cache_key:
             with st.spinner("Analysiere Audio …"):
-                with tempfile.NamedTemporaryFile(suffix=os.path.splitext(audio_name_to_use)[1], delete=False) as tmp:
+                with tempfile.NamedTemporaryFile(
+                    suffix=os.path.splitext(audio_name_to_use)[1], delete=False
+                ) as tmp:
                     tmp.write(audio_bytes_to_use)
                     tmp_path = tmp.name
+
                 bpm, beat_times = analyse_beats(tmp_path)
-                # Gesamtlänge des Tracks ermitteln
+
                 import soundfile as sf
                 info = sf.info(tmp_path)
+
+                # Wellenform des gesamten Tracks bei niedriger SR für Anzeige
+                y_full, sr_full = librosa.load(tmp_path, sr=4000, mono=True)
+
                 st.session_state.bpm          = bpm
                 st.session_state.beat_times   = beat_times
                 st.session_state.audio_total  = info.duration
+                st.session_state.y_full       = y_full
+                st.session_state.sr_full      = sr_full
                 st.session_state._audio_cache_key = cache_key
                 st.session_state._audio_tmp   = tmp_path
 
         bpm        = st.session_state.bpm
         beat_times = st.session_state.beat_times
         total_len  = st.session_state.audio_total
-        tmp_path   = st.session_state._audio_tmp
+        y_full     = st.session_state.y_full
+        sr_full    = st.session_state.sr_full
 
         st.markdown(
             f'<span class="chip orange">♩ {bpm:.0f} BPM</span>'
@@ -397,22 +406,29 @@ with col_audio:
             unsafe_allow_html=True,
         )
 
-        # ── Audiobereich-Auswahl ──────────────────────────────────────────
-        st.markdown("**Audiobereich (Start → Ende)**")
-        max_end = min(float(int(total_len)), 300.0)   # max 5 min anzeigen
-        saved_start = min(audio_start, max_end - 5.0)
-        saved_end   = min(audio_end,   max_end)
-        audio_start, audio_end = st.slider(
-            "Audiobereich",
+        # ── Fenster-Breite = Gesamtlänge des Reels ───────────────────────
+        window = float(total_dur)   # Fensterbreite in Sekunden
+        max_start = max(0.0, round(total_len - window, 1))
+
+        saved_start = min(float(audio_start), max_start)
+        audio_start = st.slider(
+            "▶ Startposition im Track",
             min_value=0.0,
-            max_value=max_end,
-            value=(saved_start, saved_end),
+            max_value=max_start,
+            value=saved_start,
             step=0.5,
             format="%.1f s",
-            label_visibility="collapsed",
         )
-        sel_dur = audio_end - audio_start
-        st.caption(f"Ausgewählt: {audio_start:.1f} s – {audio_end:.1f} s  ({sel_dur:.1f} s)")
+        audio_end = audio_start + window
+
+        mins_s = int(audio_start // 60)
+        secs_s = audio_start % 60
+        mins_e = int(audio_end // 60)
+        secs_e = audio_end % 60
+        st.caption(
+            f"Fenster: {mins_s}:{secs_s:04.1f} → {mins_e}:{secs_e:04.1f}  "
+            f"({window:.0f} s)"
+        )
 
         # ── Fade-in / Fade-out ────────────────────────────────────────────
         fc1, fc2 = st.columns(2)
@@ -423,35 +439,58 @@ with col_audio:
             audio_fade_out = st.slider("Fade-out (s)", 0.0, 4.0,
                                        loaded_s.get("audio_fade_out", 2.0), 0.5)
 
-        # ── Beat-Plot mit Bereichsmarkierung ─────────────────────────────
-        y, sr = librosa.load(tmp_path, sr=None, mono=True,
-                             offset=audio_start, duration=min(sel_dur, 30.0))
-        times = np.linspace(audio_start, audio_start + len(y)/sr, num=len(y))
+        # ── Wellenform: gesamter Track + Fenster-Rechteck + Beats ────────
+        times_full = np.linspace(0, total_len, num=len(y_full))
+        step_w = max(1, len(y_full) // 3000)
 
         fig = go.Figure()
-        step = max(1, len(y) // 2000)
+
+        # Wellenform außerhalb des Fensters (dunkel)
         fig.add_trace(go.Scatter(
-            x=times[::step], y=y[::step], mode="lines",
-            line=dict(color="#444", width=0.8), showlegend=False,
+            x=times_full[::step_w], y=y_full[::step_w],
+            mode="lines", line=dict(color="#333", width=0.7),
+            showlegend=False,
         ))
-        # Ausgewählter Bereich als grüne Füllung
-        fig.add_vrect(x0=audio_start, x1=audio_end,
-                      fillcolor="rgba(34,197,94,0.06)", line_width=0)
-        fig.add_vline(x=audio_start, line_width=1.5, line_color="#22c55e", line_dash="dot")
-        fig.add_vline(x=audio_end,   line_width=1.5, line_color="#22c55e", line_dash="dot")
-        # Schnittmarken (verschoben um audio_start)
+
+        # Wellenform innerhalb des Fensters (heller)
+        mask = (times_full >= audio_start) & (times_full <= audio_end)
+        if mask.any():
+            fig.add_trace(go.Scatter(
+                x=times_full[mask][::max(1, mask.sum() // 1500)],
+                y=y_full[mask][::max(1, mask.sum() // 1500)],
+                mode="lines", line=dict(color="#888", width=0.9),
+                showlegend=False,
+            ))
+
+        # Fenster-Rechteck
+        fig.add_vrect(
+            x0=audio_start, x1=audio_end,
+            fillcolor="rgba(255,107,53,0.08)",
+            line_color="#ff6b35", line_width=1.5,
+        )
+
+        # Beat-Marker im gesamten Track
         for bt in beat_times[beats_per_cut - 1 :: beats_per_cut]:
-            abs_bt = bt + audio_start
-            if audio_start <= abs_bt <= audio_end:
-                fig.add_vline(x=abs_bt, line_width=1, line_color="#ff6b35", opacity=0.6)
+            inside = audio_start <= bt <= audio_end
+            fig.add_vline(
+                x=bt,
+                line_width=1.0,
+                line_color="#ff6b35" if inside else "#555",
+                opacity=0.8 if inside else 0.3,
+            )
+
         fig.update_layout(
             paper_bgcolor="#1a1a1a", plot_bgcolor="#1a1a1a",
-            margin=dict(l=8, r=8, t=8, b=30), height=150,
-            xaxis=dict(title="Zeit (s)", color="#666", gridcolor="#2a2a2a", tickfont=dict(size=10)),
+            margin=dict(l=8, r=8, t=8, b=30), height=160,
+            xaxis=dict(
+                title="Zeit (s)", color="#666",
+                gridcolor="#2a2a2a", tickfont=dict(size=10),
+                range=[0, total_len],
+            ),
             yaxis=dict(showticklabels=False, gridcolor="#2a2a2a"),
         )
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-        st.caption("🟠 Schnittmarken · 🟢 Ausgewählter Bereich")
+        st.caption("🟠 Beats im Fenster · — Beats außerhalb · □ Ausgewähltes Fenster")
 
     else:
         audio_start, audio_end = 0.0, 30.0
@@ -548,7 +587,7 @@ if render_clicked and ready:
                         "crossfade": crossfade, "beats_per_cut": beats_per_cut,
                         "kb_min": kb_min, "kb_max": kb_max,
                         "grade": grade, "vignette_strength": vignette_strength,
-                        "audio_start": audio_start, "audio_end": audio_end,
+                        "audio_start": audio_start,
                         "audio_fade_in": audio_fade_in, "audio_fade_out": audio_fade_out,
                     }
                     pname = locals().get("project_name", "") or ""
