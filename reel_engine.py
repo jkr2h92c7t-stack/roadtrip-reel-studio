@@ -1,6 +1,6 @@
 """
 Reel Engine — Kernlogik für Video-Generierung.
-Wird sowohl von app.py (Streamlit) als auch von make_reel.py (CLI) genutzt.
+Nutzt moviepy 2.x API.
 """
 
 import os
@@ -8,13 +8,13 @@ import random
 import numpy as np
 import librosa
 from PIL import Image
-from moviepy.editor import (
+from moviepy import (
     AudioFileClip,
-    ImageClip,
+    VideoClip,
     concatenate_videoclips,
 )
-from moviepy.video.fx.fadein import fadein
-from moviepy.video.fx.fadeout import fadeout
+from moviepy.video.fx import FadeIn, FadeOut
+from moviepy.audio.fx import AudioFadeOut
 
 W, H   = 1080, 1920
 FPS    = 30
@@ -40,12 +40,12 @@ def cover_crop_array(img: Image.Image, tw: int, th: int) -> np.ndarray:
 
 
 def ken_burns_clip(
-    image_source,           # Pfad (str) oder PIL.Image
+    image_source,
     duration: float,
     zoom_min: float = KB_ZOOM_MIN_FOTO,
     zoom_max: float = KB_ZOOM_MAX_FOTO,
     seed: int | None = None,
-) -> ImageClip:
+) -> VideoClip:
     if seed is not None:
         random.seed(seed)
 
@@ -87,7 +87,7 @@ def ken_burns_clip(
         patch = arr_big[y1:y2, x1:x2]
         return np.array(Image.fromarray(patch).resize((W, H), Image.LANCZOS))
 
-    return ImageClip(make_frame, duration=duration, ismask=False).set_fps(FPS)
+    return VideoClip(make_frame, duration=duration).with_fps(FPS)
 
 
 # ── Beat-Analyse ──────────────────────────────────────────────────────────────
@@ -96,7 +96,6 @@ def analyse_beats(
     audio_path: str,
     max_duration: float = MAX_DURATION,
 ) -> tuple[float, np.ndarray]:
-    """Gibt (bpm, beat_times_array) zurück."""
     y, sr = librosa.load(audio_path, sr=None, mono=True, duration=max_duration)
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
@@ -130,11 +129,11 @@ def dissolve(clips: list, crossfade: float):
     result = []
     for i, clip in enumerate(clips):
         if i == 0:
-            clip = fadeout(clip, crossfade)
+            clip = clip.with_effects([FadeOut(crossfade)])
         elif i == len(clips) - 1:
-            clip = fadein(clip, crossfade)
+            clip = clip.with_effects([FadeIn(crossfade)])
         else:
-            clip = fadein(fadeout(clip, crossfade), crossfade)
+            clip = clip.with_effects([FadeIn(crossfade), FadeOut(crossfade)])
         result.append(clip)
     return concatenate_videoclips(result, method="compose", padding=-crossfade)
 
@@ -142,30 +141,25 @@ def dissolve(clips: list, crossfade: float):
 # ── Haupt-Render-Funktion ─────────────────────────────────────────────────────
 
 def render_reel(
-    titel_source,           # Pfad (str) oder PIL.Image
-    foto_sources: list,     # Liste von Pfaden (str) oder PIL.Images
+    titel_source,
+    foto_sources: list,
     output_path: str,
     audio_path: str | None  = None,
     total_duration: float   = 20.0,
     titel_duration: float   = 3.5,
     crossfade: float        = 0.35,
     beats_per_cut: int      = 2,
-    progress_callback=None, # optionale Funktion(step: int, total: int, msg: str)
+    progress_callback=None,
 ):
-    """
-    Rendert ein komplettes Reel und speichert es als MP4.
-    progress_callback(step, total, message) wird nach jedem Clip aufgerufen.
-    """
-
-    n_fotos  = len(foto_sources)
-    n_total  = 1 + n_fotos   # Titelkarte + Fotos
-    step     = 0
+    n_fotos = len(foto_sources)
+    n_total = 1 + n_fotos
+    step    = 0
 
     def progress(msg):
         nonlocal step
         step += 1
         if progress_callback:
-            progress_callback(step, n_total + 2, msg)  # +2 für Dissolve + Export
+            progress_callback(step, n_total + 2, msg)
 
     # Segmentlängen
     if audio_path:
@@ -174,7 +168,7 @@ def render_reel(
         if len(foto_durs) > n_fotos:
             foto_durs = foto_durs[:n_fotos]
         elif len(foto_durs) < n_fotos:
-            foto_sources = foto_sources[: len(foto_durs)]
+            foto_sources = foto_sources[:len(foto_durs)]
     else:
         foto_durs = even_durations(n_fotos, min(total_duration, MAX_DURATION), titel_duration)
 
@@ -195,13 +189,13 @@ def render_reel(
     progress("Füge Crossfades zusammen …")
     final = dissolve([titel_clip] + foto_clips, crossfade)
     if final.duration > MAX_DURATION:
-        final = final.subclip(0, MAX_DURATION)
+        final = final.subclipped(0, MAX_DURATION)
 
     # Audio
     if audio_path:
-        audio = AudioFileClip(audio_path).subclip(0, final.duration)
-        audio = audio.audio_fadeout(AUDIO_FADE_OUT)
-        final = final.set_audio(audio)
+        audio = AudioFileClip(audio_path).subclipped(0, final.duration)
+        audio = audio.with_effects([AudioFadeOut(AUDIO_FADE_OUT)])
+        final = final.with_audio(audio)
 
     # Export
     progress("Exportiere MP4 …")
@@ -216,7 +210,6 @@ def render_reel(
         threads=os.cpu_count(),
         preset="slow",
         ffmpeg_params=["-crf", "18", "-pix_fmt", "yuv420p"],
-        verbose=False,
         logger=None,
     )
 
